@@ -1,15 +1,19 @@
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+import cv2
+import csv
 import os
-import random
+from PIL import Image, ImageDraw, ImageFont
 from tensorflow.keras.models import load_model
 from tensorflow.keras.losses import BinaryCrossentropy, MeanSquaredError
 import tensorflow as tf
+import random
 
 MODEL_SAVE_PATH = 'model/baseline_marking_model.keras'
 FONT_PATH = 'data/MonlamTBslim.ttf'
 IMAGE_SIZE = (256, 256)
 FONT_SIZE = 80
+RESIZED_SIZE = (200, 256)
+CSV_OUTPUT_PATH = 'data/baseline_coordinates/drepung_baseline_coordinates.csv'
 
 
 def combined_loss(y_true, y_pred):
@@ -71,9 +75,38 @@ def run_inference(model, input_data, threshold=0.5):
 def save_predicted_image(predicted_image, output_path, original_size):
     predicted_image = (predicted_image.squeeze() * 255).astype(np.uint8)
     predicted_image = Image.fromarray(predicted_image)
-    predicted_image = predicted_image.resize(original_size, Image.BILINEAR)
+    predicted_image = predicted_image.resize(RESIZED_SIZE, Image.BILINEAR)
     predicted_image.save(output_path)
     print(f"Saved predicted image to {output_path}")
+
+
+def find_bounding_box(image):
+    image_cv = np.array(image)
+
+    image_hsv = cv2.cvtColor(image_cv, cv2.COLOR_RGB2HSV)
+
+    lower_red1 = np.array([0, 50, 50])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([160, 50, 50])
+    upper_red2 = np.array([180, 255, 255])
+
+    mask1 = cv2.inRange(image_hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(image_hsv, lower_red2, upper_red2)
+    mask = mask1 | mask2
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if contours:
+        x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
+
+        return [
+            [x, y],
+            [x + w, y],
+            [x + w, y + h],
+            [x, y + h]
+        ]
+
+    return [[0, 0], [0, 0], [0, 0], [0, 0]]
 
 
 def process_images_in_directory(glyph_image_dir, output_dir, model, threshold=0.5, num_samples=5, random_sampling=True):
@@ -83,17 +116,29 @@ def process_images_in_directory(glyph_image_dir, output_dir, model, threshold=0.
     selected_glyph_files = random.sample(glyph_image_files, min(
         num_samples, len(glyph_image_files))) if random_sampling else glyph_image_files
 
-    for glyph_file in selected_glyph_files:
-        glyph_image_path = os.path.join(glyph_image_dir, glyph_file)
-        input_data, original_size = prepare_inference_data(glyph_image_path)
-        predicted_cleaned_image = run_inference(model, input_data, threshold)
-        output_path = os.path.join(output_dir, f"{glyph_file}")
-        save_predicted_image(predicted_cleaned_image, output_path, original_size)
+    csv_dir = os.path.dirname(CSV_OUTPUT_PATH)
+    os.makedirs(csv_dir, exist_ok=True)
+
+    with open(CSV_OUTPUT_PATH, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["image_name", "baseline_coordinates"])
+
+        for glyph_file in selected_glyph_files:
+            glyph_image_path = os.path.join(glyph_image_dir, glyph_file)
+            input_data, original_size = prepare_inference_data(glyph_image_path)
+            predicted_cleaned_image = run_inference(model, input_data, threshold)
+            output_path = os.path.join(output_dir, f"{glyph_file}")
+            save_predicted_image(predicted_cleaned_image, output_path, original_size)
+
+            predicted_image = Image.open(output_path)
+            corners = find_bounding_box(predicted_image)
+            coordinates = str(corners)
+            writer.writerow([glyph_file, coordinates])
 
 
 if __name__ == "__main__":
     model = load_trained_model()
-    input_glyph_image_dir = 'data/test_images/derge/cleaned_images'
-    output_predicted_dir = 'data/predicted_marking/derge'
+    input_glyph_image_dir = 'data/test_images/drepung/cleaned_images'
+    output_predicted_dir = 'data/predicted_marking/drepung'
     process_images_in_directory(input_glyph_image_dir, output_predicted_dir, model,
                                 threshold=0.5, num_samples=5, random_sampling=True)
